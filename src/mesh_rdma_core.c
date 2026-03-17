@@ -435,6 +435,32 @@ int mesh_rdma_connect_qp(struct ibv_qp *qp,
 
     enum ibv_mtu path_mtu = remote->mtu ? remote->mtu : nic->active_mtu;
 
+    /* Diagnostic: dump raw handshake data BEFORE any byte conversion */
+    fprintf(stderr, "[mesh-rdma] === RTR DIAG for local QP %u on NIC %s ===\n",
+            qp->qp_num, nic->rdma_name);
+    fprintf(stderr, "[mesh-rdma]   remote->qp_num raw=0x%08x, ntohl=0x%08x (%u)\n",
+            remote->qp_num, ntohl(remote->qp_num), ntohl(remote->qp_num));
+    fprintf(stderr, "[mesh-rdma]   remote->psn    raw=0x%08x, ntohl=0x%08x (%u)\n",
+            remote->psn, ntohl(remote->psn), ntohl(remote->psn));
+    fprintf(stderr, "[mesh-rdma]   remote->mtu=%d, nic->active_mtu=%d, path_mtu=%d\n",
+            remote->mtu, nic->active_mtu, path_mtu);
+    fprintf(stderr, "[mesh-rdma]   remote->gid_index=%d, nic->gid_index=%d (sgid_index)\n",
+            remote->gid_index, nic->gid_index);
+    fprintf(stderr, "[mesh-rdma]   nic->port_num=%d, nic->ip_addr=0x%08x\n",
+            nic->port_num, nic->ip_addr);
+    fprintf(stderr, "[mesh-rdma]   remote GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:"
+            "%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
+            remote->gid[0], remote->gid[1], remote->gid[2], remote->gid[3],
+            remote->gid[4], remote->gid[5], remote->gid[6], remote->gid[7],
+            remote->gid[8], remote->gid[9], remote->gid[10], remote->gid[11],
+            remote->gid[12], remote->gid[13], remote->gid[14], remote->gid[15]);
+    fprintf(stderr, "[mesh-rdma]   local  GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:"
+            "%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
+            nic->gid.raw[0], nic->gid.raw[1], nic->gid.raw[2], nic->gid.raw[3],
+            nic->gid.raw[4], nic->gid.raw[5], nic->gid.raw[6], nic->gid.raw[7],
+            nic->gid.raw[8], nic->gid.raw[9], nic->gid.raw[10], nic->gid.raw[11],
+            nic->gid.raw[12], nic->gid.raw[13], nic->gid.raw[14], nic->gid.raw[15]);
+
     /* RTR — Ready to Receive */
     for (int attempt = 0; attempt < max_retries; attempt++) {
         memset(&qp_attr, 0, sizeof(qp_attr));
@@ -458,7 +484,11 @@ int mesh_rdma_connect_qp(struct ibv_qp *qp,
                 IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
                 IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER);
 
-        if (ret == 0) break;
+        if (ret == 0) {
+            fprintf(stderr, "[mesh-rdma]   RTR SUCCESS: dest_qp=%u, rq_psn=%u, mtu=%d, sgid_idx=%d\n",
+                    qp_attr.dest_qp_num, qp_attr.rq_psn, qp_attr.path_mtu, qp_attr.ah_attr.grh.sgid_index);
+            break;
+        }
         if (attempt < max_retries - 1) {
             fprintf(stderr, "[mesh-rdma] RTR attempt %d/%d failed: errno=%d (%s) dest_qp=%u gid_index=%d\n",
                     attempt+1, max_retries, errno, strerror(errno),
@@ -564,6 +594,12 @@ int mesh_rdma_accept_handshake(int listen_sock,
     ssize_t n = recv(conn, remote_info, sizeof(*remote_info), MSG_WAITALL);
     if (n != sizeof(*remote_info)) { close(conn); return -1; }
 
+    fprintf(stderr, "[mesh-rdma] ACCEPT handshake: recv'd remote qp_num raw=0x%08x from %s:%d\n",
+            remote_info->qp_num,
+            inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+    fprintf(stderr, "[mesh-rdma] ACCEPT handshake: sending local qp_num raw=0x%08x\n",
+            local_info->qp_num);
+
     n = send(conn, local_info, sizeof(*local_info), 0);
     if (n != sizeof(*local_info)) { close(conn); return -1; }
 
@@ -624,11 +660,19 @@ int mesh_rdma_send_handshake(uint32_t remote_ip, uint16_t remote_port,
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
+    fprintf(stderr, "[mesh-rdma] CONNECT handshake: sending local qp_num raw=0x%08x to %d.%d.%d.%d:%d\n",
+            local_info->qp_num,
+            (remote_ip >> 24) & 0xFF, (remote_ip >> 16) & 0xFF,
+            (remote_ip >> 8) & 0xFF, remote_ip & 0xFF, remote_port);
+
     ssize_t n = send(sock, local_info, sizeof(*local_info), 0);
     if (n != sizeof(*local_info)) { close(sock); return -1; }
 
     n = recv(sock, remote_info, sizeof(*remote_info), MSG_WAITALL);
     if (n != sizeof(*remote_info)) { close(sock); return -1; }
+
+    fprintf(stderr, "[mesh-rdma] CONNECT handshake: recv'd remote qp_num raw=0x%08x\n",
+            remote_info->qp_num);
 
     close(sock);
     return 0;
