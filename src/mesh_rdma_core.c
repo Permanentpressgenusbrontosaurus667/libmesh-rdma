@@ -139,38 +139,15 @@ uint32_t mesh_rdma_gid_to_ipv4(const union ibv_gid *gid) {
            ((uint32_t)gid->raw[15]);
 }
 
-/*
- * Read GID type from sysfs. Returns:
- *   1 = RoCE v2 (what we want — UDP/IP encapsulation)
- *   0 = IB/RoCE v1 (raw Ethernet, wrong encapsulation for switchless)
- *  -1 = unknown / error
- */
-static int query_gid_type(const char *rdma_name, int port_num, int gid_index) {
-    char path[256], buf[64];
-    snprintf(path, sizeof(path),
-             "/sys/class/infiniband/%s/ports/%d/gid_attrs/types/%d",
-             rdma_name, port_num, gid_index);
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return -1; }
-    fclose(f);
-    /* sysfs shows "RoCE v2", "IB/RoCE v1", or "RoCE v1" */
-    if (strstr(buf, "v2")) return 1;
-    return 0;
-}
-
 int mesh_rdma_find_ipv4_gid_index(struct ibv_context *context,
                                    int port_num,
                                    uint32_t expected_ip) {
     union ibv_gid gid;
-    int best_v2_any = -1;   /* Any RoCEv2 IPv4-mapped GID (wrong IP) */
-    int best_any = -1;      /* Fallback: any IPv4-mapped GID (v1) */
+    int best_index = -1;
     struct ibv_port_attr port_attr;
 
     if (!context) return -1;
     if (ibv_query_port(context, port_num, &port_attr) != 0) return -1;
-
-    const char *dev_name = ibv_get_device_name(context->device);
 
     int max_gids = port_attr.gid_tbl_len;
     if (max_gids > 16) max_gids = 16;
@@ -185,40 +162,17 @@ int mesh_rdma_find_ipv4_gid_index(struct ibv_context *context,
         }
         if (all_zero) continue;
 
-        if (!mesh_rdma_gid_is_ipv4_mapped(&gid)) continue;
-
-        uint32_t gid_ip = mesh_rdma_gid_to_ipv4(&gid);
-        int is_v2 = query_gid_type(dev_name, port_num, i);
-
-        if (expected_ip != 0 && gid_ip == expected_ip && is_v2 == 1) {
-            /* Perfect: right IP + RoCEv2 */
-            fprintf(stderr, "[mesh-rdma] GID index %d: IP match + RoCE v2 ✓ (dev=%s)\n",
-                    i, dev_name);
-            return i;
-        }
-
-        /* Track fallback candidates in priority order */
-        if (is_v2 == 1 && best_v2_any < 0)
-            best_v2_any = i;
-        else if (best_any < 0)
-            best_any = i;
-    }
-
-    /* Prefer RoCEv2 over v1 in all fallback cases */
-    int result = (best_v2_any >= 0) ? best_v2_any : best_any;
-
-    if (result >= 0) {
-        int is_v2 = query_gid_type(dev_name, port_num, result);
-        fprintf(stderr, "[mesh-rdma] GID index %d selected (dev=%s, RoCE %s, %s IP match)\n",
-                result, dev_name, is_v2 == 1 ? "v2" : "v1",
-                expected_ip != 0 ? "with" : "no");
-        if (is_v2 != 1) {
-            fprintf(stderr, "[mesh-rdma] WARNING: no RoCE v2 GID found for %s — "
-                    "connection will likely fail on switchless links\n", dev_name);
+        if (mesh_rdma_gid_is_ipv4_mapped(&gid)) {
+            uint32_t gid_ip = mesh_rdma_gid_to_ipv4(&gid);
+            if (expected_ip != 0 && gid_ip == expected_ip) {
+                return i;
+            }
+            if (best_index < 0) {
+                best_index = i;
+            }
         }
     }
-
-    return result;
+    return best_index;
 }
 
 /* ============================================================
@@ -481,6 +435,32 @@ int mesh_rdma_connect_qp(struct ibv_qp *qp,
 
     enum ibv_mtu path_mtu = remote->mtu ? remote->mtu : nic->active_mtu;
 
+    /* Diagnostic: dump raw handshake data BEFORE any byte conversion */
+    fprintf(stderr, "[mesh-rdma] === RTR DIAG for local QP %u on NIC %s ===\n",
+            qp->qp_num, nic->rdma_name);
+    fprintf(stderr, "[mesh-rdma]   remote->qp_num raw=0x%08x, ntohl=0x%08x (%u)\n",
+            remote->qp_num, ntohl(remote->qp_num), ntohl(remote->qp_num));
+    fprintf(stderr, "[mesh-rdma]   remote->psn    raw=0x%08x, ntohl=0x%08x (%u)\n",
+            remote->psn, ntohl(remote->psn), ntohl(remote->psn));
+    fprintf(stderr, "[mesh-rdma]   remote->mtu=%d, nic->active_mtu=%d, path_mtu=%d\n",
+            remote->mtu, nic->active_mtu, path_mtu);
+    fprintf(stderr, "[mesh-rdma]   remote->gid_index=%d, nic->gid_index=%d (sgid_index)\n",
+            remote->gid_index, nic->gid_index);
+    fprintf(stderr, "[mesh-rdma]   nic->port_num=%d, nic->ip_addr=0x%08x\n",
+            nic->port_num, nic->ip_addr);
+    fprintf(stderr, "[mesh-rdma]   remote GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:"
+            "%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
+            remote->gid[0], remote->gid[1], remote->gid[2], remote->gid[3],
+            remote->gid[4], remote->gid[5], remote->gid[6], remote->gid[7],
+            remote->gid[8], remote->gid[9], remote->gid[10], remote->gid[11],
+            remote->gid[12], remote->gid[13], remote->gid[14], remote->gid[15]);
+    fprintf(stderr, "[mesh-rdma]   local  GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:"
+            "%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
+            nic->gid.raw[0], nic->gid.raw[1], nic->gid.raw[2], nic->gid.raw[3],
+            nic->gid.raw[4], nic->gid.raw[5], nic->gid.raw[6], nic->gid.raw[7],
+            nic->gid.raw[8], nic->gid.raw[9], nic->gid.raw[10], nic->gid.raw[11],
+            nic->gid.raw[12], nic->gid.raw[13], nic->gid.raw[14], nic->gid.raw[15]);
+
     /* RTR — Ready to Receive */
     for (int attempt = 0; attempt < max_retries; attempt++) {
         memset(&qp_attr, 0, sizeof(qp_attr));
@@ -504,7 +484,11 @@ int mesh_rdma_connect_qp(struct ibv_qp *qp,
                 IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
                 IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER);
 
-        if (ret == 0) break;
+        if (ret == 0) {
+            fprintf(stderr, "[mesh-rdma]   RTR SUCCESS: dest_qp=%u, rq_psn=%u, mtu=%d, sgid_idx=%d\n",
+                    qp_attr.dest_qp_num, qp_attr.rq_psn, qp_attr.path_mtu, qp_attr.ah_attr.grh.sgid_index);
+            break;
+        }
         if (attempt < max_retries - 1) {
             fprintf(stderr, "[mesh-rdma] RTR attempt %d/%d failed: errno=%d (%s) dest_qp=%u gid_index=%d\n",
                     attempt+1, max_retries, errno, strerror(errno),
@@ -610,6 +594,12 @@ int mesh_rdma_accept_handshake(int listen_sock,
     ssize_t n = recv(conn, remote_info, sizeof(*remote_info), MSG_WAITALL);
     if (n != sizeof(*remote_info)) { close(conn); return -1; }
 
+    fprintf(stderr, "[mesh-rdma] ACCEPT handshake: recv'd remote qp_num raw=0x%08x from %s:%d\n",
+            remote_info->qp_num,
+            inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+    fprintf(stderr, "[mesh-rdma] ACCEPT handshake: sending local qp_num raw=0x%08x\n",
+            local_info->qp_num);
+
     n = send(conn, local_info, sizeof(*local_info), 0);
     if (n != sizeof(*local_info)) { close(conn); return -1; }
 
@@ -670,11 +660,19 @@ int mesh_rdma_send_handshake(uint32_t remote_ip, uint16_t remote_port,
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
+    fprintf(stderr, "[mesh-rdma] CONNECT handshake: sending local qp_num raw=0x%08x to %d.%d.%d.%d:%d\n",
+            local_info->qp_num,
+            (remote_ip >> 24) & 0xFF, (remote_ip >> 16) & 0xFF,
+            (remote_ip >> 8) & 0xFF, remote_ip & 0xFF, remote_port);
+
     ssize_t n = send(sock, local_info, sizeof(*local_info), 0);
     if (n != sizeof(*local_info)) { close(sock); return -1; }
 
     n = recv(sock, remote_info, sizeof(*remote_info), MSG_WAITALL);
     if (n != sizeof(*remote_info)) { close(sock); return -1; }
+
+    fprintf(stderr, "[mesh-rdma] CONNECT handshake: recv'd remote qp_num raw=0x%08x\n",
+            remote_info->qp_num);
 
     close(sock);
     return 0;
