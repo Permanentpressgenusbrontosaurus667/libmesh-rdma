@@ -741,8 +741,9 @@ int mesh_rdma_connect(mesh_rdma_ctx_t *ctx,
             local_info.gid[0], local_info.gid[1], local_info.gid[14], local_info.gid[15],
             ntohl(local_info.qp_num), local_info.gid_index);
 
-    /* TCP handshake */
-    if (mesh_rdma_send_handshake(remote_ip, remote_handle->handshake_port,
+    /* TCP handshake — use override IP if provided */
+    uint32_t handshake_dest = remote_handle->handshake_ip ? remote_handle->handshake_ip : remote_ip;
+    if (mesh_rdma_send_handshake(handshake_dest, remote_handle->handshake_port,
                                   &local_info, &remote_info) != 0) {
         LOG_ERR(ctx, "Handshake failed");
         ibv_destroy_qp(qp);

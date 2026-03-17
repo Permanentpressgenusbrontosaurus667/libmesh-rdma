@@ -92,6 +92,7 @@ typedef struct mesh_rdma_handle {
         uint8_t     nic_idx;
         uint8_t     gid_index;
     } addrs[6];
+    uint32_t handshake_ip;  /* Override IP for TCP handshake (host byte order, 0=use GID) */
 } mesh_rdma_handle_t;
 
 /* ============================================================

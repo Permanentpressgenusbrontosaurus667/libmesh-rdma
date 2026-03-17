@@ -73,16 +73,17 @@ int MPI_Barrier(MPI_Comm comm) {
 
     if (size <= 1) return MPI_SUCCESS;
 
-    /* Simple dissemination barrier */
+    /* Ring barrier: token passes around ring twice */
     int next = (rank + 1) % size;
     int prev = (rank - 1 + size) % size;
-
-    /* Send to next, recv from prev */
-    MPI_Request sreq;
-    MPI_Isend(&token, 1, MPI_BYTE, next, 0xFFFF, comm, &sreq);
-    MPI_Recv(&token, 1, MPI_BYTE, prev, 0xFFFF, comm, MPI_STATUS_IGNORE);
-    MPI_Wait(&sreq, MPI_STATUS_IGNORE);
-
+    /* Phase 1: gather to rank 0 */
+    if (rank != 0) {
+        MPI_Recv(&token, 1, MPI_BYTE, prev, 0xFFFF, comm, MPI_STATUS_IGNORE);
+        MPI_Send(&token, 1, MPI_BYTE, next, 0xFFFF, comm);
+    } else {
+        MPI_Send(&token, 1, MPI_BYTE, next, 0xFFFF, comm);
+        MPI_Recv(&token, 1, MPI_BYTE, prev, 0xFFFF, comm, MPI_STATUS_IGNORE);
+    }
     return MPI_SUCCESS;
 }
 
@@ -98,23 +99,45 @@ int MPI_Ibarrier(MPI_Comm comm, MPI_Request *request) {
  * ============================================================ */
 
 int MPI_Bcast(void *buffer, int count, MPI_Datatype datatype,
-              int root, MPI_Comm comm) {
-    int size = comm->size;
+              int root, MPI_Comm comm)
+{
     int rank = comm->rank;
-    size_t len = count * (size_t)datatype;
+    int size = comm->size;
+    size_t bytes = (size_t)count * (size_t)datatype;
 
     if (size <= 1) return MPI_SUCCESS;
 
-    /* Linear chain from root */
+    fprintf(stderr, "[mesh-mpi] rank %d: ENTER Bcast root=%d count=%d\n", rank, root, count);
+    fflush(stderr);
+
+    int prev = (rank - 1 + size) % size;
+    int next = (rank + 1) % size;
+
     if (rank == root) {
-        for (int i = 0; i < size; i++) {
-            if (i == root) continue;
-            MPI_Send(buffer, count, datatype, i, 0xFFFD, comm);
-        }
+        // Root sends to prev (reverse direction)
+        MPI_Send(buffer, count, datatype, prev, 0xB001, comm);
+        fprintf(stderr, "[mesh-mpi] rank %d (root): sent data forward\n", rank);
+        fflush(stderr);
     } else {
-        MPI_Recv(buffer, count, datatype, root, 0xFFFD, comm, MPI_STATUS_IGNORE);
+        // Receive from previous → then forward if not the last in chain
+        MPI_Recv(buffer, count, datatype, next, 0xB001, comm, MPI_STATUS_IGNORE);
+        fprintf(stderr, "[mesh-mpi] rank %d: received data from %d\n", rank, prev);
+        fflush(stderr);
+
+        // Only forward if we're not the last rank in the logical chain
+        if (prev != root) {
+            MPI_Send(buffer, count, datatype, prev, 0xB001, comm);
+            fprintf(stderr, "[mesh-mpi] rank %d: forwarded data to %d\n", rank, next);
+            fflush(stderr);
+        } else {
+            fprintf(stderr, "[mesh-mpi] rank %d: last in chain - no forward\n", rank);
+            fflush(stderr);
+        }
     }
-    (void)len;
+
+    fprintf(stderr, "[mesh-mpi] rank %d: Bcast completed\n", rank);
+    fflush(stderr);
+
     return MPI_SUCCESS;
 }
 
@@ -134,26 +157,31 @@ int MPI_Reduce(const void *sendbuf, void *recvbuf, int count,
         return MPI_SUCCESS;
     }
 
-    if (rank == root) {
-        /* Copy sendbuf to recvbuf first */
-        if (sendbuf != MPI_IN_PLACE)
-            memcpy(recvbuf, sendbuf, len);
+    fprintf(stderr, "[mesh-mpi] rank %d: ENTER Reduce root=%d\n", rank, root); fflush(stderr);
+    /* Chain reduce: prev -> rank -> next, accumulating toward root */
+    int prev = (rank - 1 + size) % size;
+    int next = (rank + 1) % size;
 
-        /* Receive and accumulate from all others */
-        void *tmp = malloc(len);
-        for (int i = 0; i < size; i++) {
-            if (i == root) continue;
-            MPI_Recv(tmp, count, datatype, i, 0xFFFC, comm, MPI_STATUS_IGNORE);
-            apply_op(recvbuf, tmp, count, datatype, op);
-        }
-        free(tmp);
-    } else {
-        const void *sbuf = (sendbuf == MPI_IN_PLACE) ? recvbuf : sendbuf;
-        MPI_Send(sbuf, count, datatype, root, 0xFFFC, comm);
+    if (sendbuf != MPI_IN_PLACE)
+        memcpy(recvbuf, sendbuf, len);
+
+    /* Everyone except the rank "after root" (first in chain) receives from prev */
+    void *tmp = malloc(len);
+    if (prev != root) {
+        /* We have a predecessor in the chain — recv and accumulate */
+        MPI_Recv(tmp, count, datatype, prev, 0xFFFC, comm, MPI_STATUS_IGNORE);
+        apply_op(recvbuf, tmp, count, datatype, op);
     }
+
+    /* Everyone except root sends to next */
+    if (rank != root) {
+        MPI_Send(recvbuf, count, datatype, next, 0xFFFC, comm);
+    }
+    free(tmp);
 
     return MPI_SUCCESS;
 }
+
 
 /* ============================================================
  * MPI_Allreduce — reduce + bcast
@@ -166,6 +194,8 @@ int MPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
     if (sendbuf != MPI_IN_PLACE)
         memcpy(recvbuf, sendbuf, len);
 
+    fprintf(stderr, "[mesh-mpi] rank %d: ENTER Allreduce count=%d\n", comm->rank, count);
+    fflush(stderr);
     MPI_Reduce(MPI_IN_PLACE, recvbuf, count, datatype, op, 0, comm);
     MPI_Bcast(recvbuf, count, datatype, 0, comm);
 
@@ -212,20 +242,36 @@ int MPI_Gather(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
     size_t send_len = sendcount * (size_t)sendtype;
     size_t recv_len = recvcount * (size_t)recvtype;
 
-    if (rank == root) {
-        /* Copy own data */
-        if (sendbuf != MPI_IN_PLACE)
-            memcpy((char *)recvbuf + rank * recv_len, sendbuf, send_len);
+    fprintf(stderr, "[mesh-mpi] rank %d: ENTER Gather root=%d\n", rank, root); fflush(stderr);
+    /* Chain gather: flow next→prev toward root (reverse ring) */
+    int next = (rank + 1) % size;
+    int prev = (rank - 1 + size) % size;
+    char *tmpbuf = malloc(size * recv_len);
+    memset(tmpbuf, 0, size * recv_len);
 
-        /* Receive from others */
+    /* Place own data */
+    if (sendbuf != MPI_IN_PLACE)
+        memcpy(tmpbuf + rank * recv_len, sendbuf, send_len);
+    else if (rank == root)
+        memcpy(tmpbuf + rank * recv_len, (char*)recvbuf + rank * recv_len, recv_len);
+
+    /* Receive from next (unless next is root = start of chain) */
+    if (next != root) {
+        char *incoming = malloc(size * recv_len);
+        MPI_Recv(incoming, size * recv_len, MPI_BYTE, next, 0xFFFB, comm, MPI_STATUS_IGNORE);
         for (int i = 0; i < size; i++) {
-            if (i == root) continue;
-            MPI_Recv((char *)recvbuf + i * recv_len, recvcount, recvtype,
-                     i, 0xFFFB, comm, MPI_STATUS_IGNORE);
+            if (i != rank) memcpy(tmpbuf + i * recv_len, incoming + i * recv_len, recv_len);
         }
-    } else {
-        MPI_Send(sendbuf, sendcount, sendtype, root, 0xFFFB, comm);
+        free(incoming);
     }
+
+    /* Forward to prev (unless we are root) */
+    if (rank != root) {
+        MPI_Send(tmpbuf, size * recv_len, MPI_BYTE, prev, 0xFFFB, comm);
+    } else {
+        memcpy(recvbuf, tmpbuf, size * recv_len);
+    }
+    free(tmpbuf);
     return MPI_SUCCESS;
 }
 
@@ -237,18 +283,34 @@ int MPI_Gatherv(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
     size_t send_len = sendcount * (size_t)sendtype;
     size_t dt_recv = (size_t)recvtype;
 
-    if (rank == root) {
-        if (sendbuf != MPI_IN_PLACE)
-            memcpy((char *)recvbuf + displs[rank] * dt_recv, sendbuf, send_len);
+    /* Chain Gatherv: pass data around ring to root */
+    int next = (rank + 1) % size;
+    int prev = (rank - 1 + size) % size;
+    int total = 0;
+    for (int i = 0; i < size; i++) total += recvcounts[i];
+    size_t total_bytes = total * dt_recv;
+    char *tmpbuf = calloc(1, total_bytes);
 
+    /* Place own data */
+    if (sendbuf != MPI_IN_PLACE)
+        memcpy(tmpbuf + displs[rank] * dt_recv, sendbuf, send_len);
+    else if (rank == root)
+        memcpy(tmpbuf + displs[rank] * dt_recv, (char*)recvbuf + displs[rank] * dt_recv, send_len);
+
+    if (next != root) {
+        char *incoming = calloc(1, total_bytes);
+        MPI_Recv(incoming, total_bytes, MPI_BYTE, next, 0xFFFA, comm, MPI_STATUS_IGNORE);
         for (int i = 0; i < size; i++) {
-            if (i == root) continue;
-            MPI_Recv((char *)recvbuf + displs[i] * dt_recv, recvcounts[i], recvtype,
-                     i, 0xFFFA, comm, MPI_STATUS_IGNORE);
+            if (i != rank) memcpy(tmpbuf + displs[i]*dt_recv, incoming + displs[i]*dt_recv, recvcounts[i]*dt_recv);
         }
-    } else {
-        MPI_Send(sendbuf, sendcount, sendtype, root, 0xFFFA, comm);
+        free(incoming);
     }
+    if (rank != root) {
+        MPI_Send(tmpbuf, total_bytes, MPI_BYTE, prev, 0xFFFA, comm);
+    } else {
+        memcpy(recvbuf, tmpbuf, total_bytes);
+    }
+    free(tmpbuf);
     return MPI_SUCCESS;
 }
 
@@ -295,18 +357,19 @@ int MPI_Alltoall(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
     memcpy((char *)recvbuf + rank * recv_chunk,
            (const char *)sendbuf + rank * send_chunk, send_chunk);
 
-    /* Exchange with all others — use ring order to avoid deadlock */
+    /* Ring-based alltoall: shift data around ring */
+    int next = (rank + 1) % size;
+    int prev = (rank - 1 + size) % size;
+    /* Each step: send one chunk to next, recv one chunk from prev */
     for (int step = 1; step < size; step++) {
-        int send_to = (rank + step) % size;
-        int recv_from = (rank - step + size) % size;
-
-        MPI_Request sreq, rreq;
-        MPI_Isend((const char *)sendbuf + send_to * send_chunk,
-                  sendcount, sendtype, send_to, 0xFFF9, comm, &sreq);
-        MPI_Irecv((char *)recvbuf + recv_from * recv_chunk,
-                  recvcount, recvtype, recv_from, 0xFFF9, comm, &rreq);
+        int send_idx = (rank + step) % size;
+        int recv_idx = (rank - step + size) % size;
+        MPI_Request sreq;
+        MPI_Isend((const char *)sendbuf + send_idx * send_chunk,
+                  sendcount, sendtype, next, 0xFFF9 + step, comm, &sreq);
+        MPI_Recv((char *)recvbuf + recv_idx * recv_chunk,
+                 recvcount, recvtype, prev, 0xFFF9 + step, comm, MPI_STATUS_IGNORE);
         MPI_Wait(&sreq, MPI_STATUS_IGNORE);
-        MPI_Wait(&rreq, MPI_STATUS_IGNORE);
     }
     return MPI_SUCCESS;
 }

@@ -23,9 +23,16 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <signal.h>
+#include <ifaddrs.h>
+#include <signal.h>
+#include <ifaddrs.h>
 
 #include "mesh_mpi_internal.h"
 #include "mpi.h"
+
+/* Alarm handler for accept timeout */
+static void alarm_handler(int sig) { (void)sig; }
 
 /* Listen states saved from bootstrap for accept */
 static void *listen_states[8];
@@ -87,6 +94,7 @@ typedef struct {
         uint32_t ip_addr;
         int nic_idx;
     } nics[8];
+    uint32_t mgmt_ip;
 } bootstrap_msg_t;
 
 static int bootstrap_server(bootstrap_msg_t *all_msgs) {
@@ -182,6 +190,28 @@ int mesh_mpi_bootstrap(void) {
     bootstrap_msg_t my_msg = {0};
     my_msg.rank = g_mpi.rank;
     my_msg.num_nics = 0;
+    /* Get our management IP from ctrl addr connection */
+    {
+        char *ctrl = getenv("MESH_MPI_CTRL_ADDR");
+        if (ctrl && g_mpi.rank == 0) {
+            /* Rank 0: parse from env */
+            char ip_str[64];
+            sscanf(ctrl, "%63[^:]", ip_str);
+            struct in_addr a;
+            inet_aton(ip_str, &a);
+            my_msg.mgmt_ip = ntohl(a.s_addr);
+        } else {
+            /* Other ranks: get our management IP from the interface */
+            struct ifaddrs *ifap, *ifa;
+            getifaddrs(&ifap);
+            for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
+                if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+                uint32_t ip = ntohl(((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr);
+                if ((ip >> 24) == 10) { my_msg.mgmt_ip = ip; break; }
+            }
+            freeifaddrs(ifap);
+        }
+    }
 
     for (int i = 0; i < mesh_rdma_num_nics(g_mpi.ctx); i++) {
         mesh_rdma_nic_t *nic = mesh_rdma_get_nic(g_mpi.ctx, i);
@@ -305,7 +335,18 @@ int mesh_mpi_bootstrap(void) {
     g_mpi.ring_prev = (g_mpi.rank + g_mpi.size - 1) % g_mpi.size;
 
     /* For each ring neighbor, find matching subnet NIC pair */
-    int neighbors[2] = { g_mpi.ring_prev, g_mpi.ring_next };
+    /* Connect in two phases to avoid deadlock:
+     * Phase 1: even ranks accept from ring_next, odd ranks connect to ring_prev
+     * Phase 2: swap roles */
+    int phase_peers[2];
+    if (g_mpi.rank % 2 == 0) {
+        phase_peers[0] = g_mpi.ring_next;  /* accept */
+        phase_peers[1] = g_mpi.ring_prev;  /* connect */
+    } else {
+        phase_peers[0] = g_mpi.ring_prev;  /* connect */
+        phase_peers[1] = g_mpi.ring_next;  /* accept */
+    }
+    int neighbors[2] = { phase_peers[0], phase_peers[1] };
     if (1) {
     for (int n = 0; n < 2; n++) {
         int peer = neighbors[n];
@@ -345,15 +386,22 @@ int mesh_mpi_bootstrap(void) {
                 p->nic_idx = my_msg.nics[li].nic_idx;
 
                 if (g_mpi.rank < peer) {
-                    /* We accept — use the listen state from bootstrap */
+                    /* Accept with timeout on listen socket */
                     void *ls = listen_states[li];
-                    if (mesh_rdma_accept(g_mpi.ctx, ls, &p->conn) != 0) {
-                        fprintf(stderr, "[mesh-mpi] rank %d: accept from rank %d failed\n",
+                    /* ls is opaque — it contains the listen sock fd
+                     * Set SO_RCVTIMEO on it before accept */
+                    int listen_fd = *(int *)((char *)ls + 2 * sizeof(void *));  /* sock after qp,cq pointers */
+                    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+                    setsockopt(listen_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                    int acc_ret = mesh_rdma_accept(g_mpi.ctx, ls, &p->conn);
+                    if (acc_ret != 0) {
+                        fprintf(stderr, "[mesh-mpi] rank %d: accept from rank %d failed/timeout\n",
                                 g_mpi.rank, peer);
                         continue;
                     }
                 } else {
-                    /* We connect to peer's handle */
+                    /* We connect — route TCP handshake via management network */
+                    peer_msg->nics[ri].handle.handshake_ip = peer_msg->mgmt_ip;
                     if (mesh_rdma_connect(g_mpi.ctx, &peer_msg->nics[ri].handle,
                                           &p->conn) != 0) {
                         fprintf(stderr, "[mesh-mpi] rank %d: connect to rank %d failed\n",
@@ -403,11 +451,82 @@ int mesh_mpi_bootstrap(void) {
             fprintf(stderr, "[mesh-mpi] rank %d: WARNING no direct link to ring neighbor %d\n",
                     g_mpi.rank, peer);
         }
+
+        /* Sync between phases — give accepting side time to re-enter listen */
+        if (n == 0) {
+            fprintf(stderr, "[mesh-mpi] rank %d: phase 1 complete, syncing...\n", g_mpi.rank);
+            usleep(500000); /* 500ms */
+        }
     }
 
     /* Phase 4: Compute relay routes for all ranks */
     }
     mesh_mpi_compute_ring_routes();
+
+    /* TCP barrier — ensure all ranks have finished connections before proceeding */
+    {
+        char ctrl_ip[64];
+        int ctrl_port = 19900;
+        char *s = getenv("MESH_MPI_CTRL_ADDR");
+        strncpy(ctrl_ip, s, sizeof(ctrl_ip)-1);
+        char *c = strchr(ctrl_ip, ':');
+        if (c) { *c = 0; ctrl_port = atoi(c+1); }
+
+        if (g_mpi.rank == 0) {
+            int lsock = socket(AF_INET, SOCK_STREAM, 0);
+            int opt = 1;
+            setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            struct sockaddr_in a = {0};
+            a.sin_family = AF_INET;
+            a.sin_port = htons(ctrl_port + 1);
+            a.sin_addr.s_addr = htonl(INADDR_ANY);
+            bind(lsock, (struct sockaddr*)&a, sizeof(a));
+            listen(lsock, 32);
+            /* Collect checkins */
+            for (int i = 0; i < g_mpi.size - 1; i++) {
+                int cs = accept(lsock, NULL, NULL);
+                char b; recv(cs, &b, 1, 0); close(cs);
+            }
+            /* Release everyone */
+            close(lsock);
+            lsock = socket(AF_INET, SOCK_STREAM, 0);
+            setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            a.sin_port = htons(ctrl_port + 2);
+            bind(lsock, (struct sockaddr*)&a, sizeof(a));
+            listen(lsock, 32);
+            /* Tell everyone to go */
+            for (int i = 0; i < g_mpi.size - 1; i++) {
+                int cs = accept(lsock, NULL, NULL);
+                char b = 1; send(cs, &b, 1, 0); close(cs);
+            }
+            close(lsock);
+        } else {
+            usleep(100000); /* let rank 0 start listening */
+            /* Check in */
+            int s1 = socket(AF_INET, SOCK_STREAM, 0);
+            struct sockaddr_in a = {0};
+            a.sin_family = AF_INET;
+            a.sin_port = htons(ctrl_port + 1);
+            inet_pton(AF_INET, ctrl_ip, &a.sin_addr);
+            for (int r = 0; r < 50; r++) {
+                if (connect(s1, (struct sockaddr*)&a, sizeof(a)) == 0) break;
+                close(s1); s1 = socket(AF_INET, SOCK_STREAM, 0);
+                usleep(100000);
+            }
+            char b = 1; send(s1, &b, 1, 0); close(s1);
+            /* Wait for release */
+            usleep(100000);
+            int s2 = socket(AF_INET, SOCK_STREAM, 0);
+            a.sin_port = htons(ctrl_port + 2);
+            for (int r = 0; r < 50; r++) {
+                if (connect(s2, (struct sockaddr*)&a, sizeof(a)) == 0) break;
+                close(s2); s2 = socket(AF_INET, SOCK_STREAM, 0);
+                usleep(100000);
+            }
+            recv(s2, &b, 1, 0); close(s2);
+        }
+        fprintf(stderr, "[mesh-mpi] rank %d: bootstrap barrier done\n", g_mpi.rank);
+    }
 
     /* free(all_msgs); -- leaked intentionally for debug */
     return 0;
@@ -418,26 +537,30 @@ int mesh_mpi_bootstrap(void) {
  * ============================================================ */
 
 int mesh_mpi_compute_ring_routes(void) {
+    /* Determine which neighbors we can actually reach */
+    int have_next = g_mpi.peers[g_mpi.ring_next].direct;
+    int have_prev = g_mpi.peers[g_mpi.ring_prev].direct;
+
     for (int dest = 0; dest < g_mpi.size; dest++) {
         if (dest == g_mpi.rank) {
             g_mpi.ring_route[dest] = -1; /* self */
             continue;
         }
 
-        /* Clockwise distance */
-        int cw = (dest - g_mpi.rank + g_mpi.size) % g_mpi.size;
-        /* Counterclockwise distance */
-        int ccw = g_mpi.size - cw;
-
-        if (cw <= ccw) {
+        if (have_next && have_prev) {
+            /* Both neighbors connected — use shortest path */
+            int cw = (dest - g_mpi.rank + g_mpi.size) % g_mpi.size;
+            int ccw = g_mpi.size - cw;
+            if (cw <= ccw)
+                g_mpi.ring_route[dest] = g_mpi.ring_next;
+            else
+                g_mpi.ring_route[dest] = g_mpi.ring_prev;
+        } else if (have_next) {
             g_mpi.ring_route[dest] = g_mpi.ring_next;
-        } else {
+        } else if (have_prev) {
             g_mpi.ring_route[dest] = g_mpi.ring_prev;
-        }
-
-        if (dest == g_mpi.ring_next || dest == g_mpi.ring_prev) {
-            /* Direct neighbor — route directly */
-            g_mpi.ring_route[dest] = dest;
+        } else {
+            g_mpi.ring_route[dest] = -1; /* isolated */
         }
 
         fprintf(stderr, "[mesh-mpi] rank %d: route to %d via %d%s\n",
@@ -595,6 +718,7 @@ int MPI_Error_string(int errorcode, char *string, int *resultlen) {
  * ============================================================ */
 
 int MPI_Comm_dup(MPI_Comm comm, MPI_Comm *newcomm) {
+    fprintf(stderr, "[mesh-mpi] rank %d: Comm_dup\n", g_mpi.rank); fflush(stderr);
     if (!comm) return MPI_ERR_COMM;
     struct mesh_mpi_comm_t *nc = &g_mpi.comms[g_mpi.num_comms];
     nc->id = g_mpi.num_comms;
@@ -620,6 +744,7 @@ int MPI_Comm_free(MPI_Comm *comm) {
 }
 
 int MPI_Comm_split(MPI_Comm comm, int color, int key, MPI_Comm *newcomm) {
+    fprintf(stderr, "[mesh-mpi] rank %d: ENTER Comm_split color=%d\n", g_mpi.rank, color);
     /* Simplified: gather (color, key, rank) from all, sort, build new comm */
     /* For now, if color == MPI_UNDEFINED, return COMM_NULL */
     if (color < 0) {
@@ -633,6 +758,7 @@ int MPI_Comm_split(MPI_Comm comm, int color, int key, MPI_Comm *newcomm) {
 int MPI_Comm_split_type(MPI_Comm comm, int split_type, int key,
                         MPI_Info info, MPI_Comm *newcomm) {
     (void)info; (void)key;
+    fprintf(stderr, "[mesh-mpi] rank %d: Comm_split_type called (type=%d)\n", g_mpi.rank, split_type);
     if (split_type == MPI_COMM_TYPE_SHARED) {
         /* Return a communicator with just this rank (each node has 1 process) */
         struct mesh_mpi_comm_t *sc = &g_mpi.comms[g_mpi.num_comms];
