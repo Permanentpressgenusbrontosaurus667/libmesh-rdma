@@ -165,7 +165,7 @@ int mesh_rdma_find_ipv4_gid_index(struct ibv_context *context,
         if (mesh_rdma_gid_is_ipv4_mapped(&gid)) {
             uint32_t gid_ip = mesh_rdma_gid_to_ipv4(&gid);
             if (expected_ip != 0 && gid_ip == expected_ip) {
-                return i;
+                best_index = i;  /* Don't return early — prefer highest index (RoCEv2) */
             }
             if (best_index < 0) {
                 best_index = i;

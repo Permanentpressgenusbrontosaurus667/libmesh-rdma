@@ -523,6 +523,15 @@ int mesh_mpi_bootstrap(void) {
 
                 fprintf(stderr, "[mesh-mpi] rank %d: RDMA connected to rank %d\n",
                         g_mpi.rank, peer);
+                /* Test: verify post_recv works on this connection */
+                if (peer == 3 || peer == 0) {
+                    fprintf(stderr, "[mesh-mpi] rank %d: post_recv test on peer %d: "
+                            "conn=%p conn->qp=%p conn->cq=%p nic=%s\n",
+                            g_mpi.rank, peer, (void*)p->conn,
+                            (void*)p->conn->qp, (void*)p->conn->cq,
+                            p->conn->nic->rdma_name);
+                    fflush(stderr);
+                }
             }
         }
 
