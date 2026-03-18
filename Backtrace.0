@@ -1,0 +1,119 @@
+Host Name: spark-a
+=== If no file names and line numbers are shown below, one can run
+            addr2line -Cpfie my_exefile my_line_address
+    to convert `my_line_address` (e.g., 0x4a6b) into file name and line number.
+    Or one can use amrex/Tools/Backtrace/parse_bt.py.
+
+=== Please note that the line number reported by addr2line may not be accurate.
+    One can use
+            readelf -wl my_exefile | grep my_line_address'
+    to find out the offset for that line.
+
+ 0: /home/titanic/warpx/build/lib/libamrex_3d.so(_ZN5amrex11BLBackTrace20print_backtrace_infoEP8_IO_FILE+0x48) [0xef7cf0db1238]
+    ?? ??:0
+
+ 1: /home/titanic/warpx/build/lib/libamrex_3d.so(_ZN5amrex11BLBackTrace7handlerEi+0x2dc) [0xef7cf0db2ea0]
+    ?? ??:0
+
+ 2: linux-vdso.so.1(__kernel_rt_sigreturn+0) [0xef7d3e8d1968]
+    ?? ??:0
+
+ 3: /lib/aarch64-linux-gnu/libc.so.6(+0x13f874) [0xef7d3e6bf874]
+
+ 4: /lib/aarch64-linux-gnu/libc.so.6(pthread_spin_lock+0x1c) [0xef7d3e60d2ac]
+
+ 5: /usr/lib/aarch64-linux-gnu/libibverbs/libmlx5-rdmav34.so(+0x260d4) [0xef7cccbd60d4]
+    ?? ??:0
+
+ 6: /home/titanic/libmesh-rdma/mpi/libmesh_mpi.so(mesh_mpi_progress+0x8c) [0xef7cf0b24ebc]
+    ?? ??:0
+
+ 7: /home/titanic/libmesh-rdma/mpi/libmesh_mpi.so(MPI_Wait+0x4c) [0xef7cf0b2519c]
+    ?? ??:0
+
+ 8: /home/titanic/libmesh-rdma/mpi/libmesh_mpi.so(MPI_Waitall+0x44) [0xef7cf0b25248]
+    ?? ??:0
+
+ 9: /home/titanic/warpx/build/lib/libamrex_3d.so(_ZN5amrex18ParallelDescriptor7WaitallERNS_6VectorIiSaIiEEERNS1_I10MPI_StatusSaIS5_EEE+0x1c) [0xef7cf0d63b8c]
+    ?? ??:0
+
+10: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN5amrex8FabArrayINS_9FArrayBoxEE19ParallelCopy_finishEv+0x47c) [0xef7ccd1b9a2c]
+    ?? ??:0
+
+11: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN7ablastr5utils13communication12ParallelCopyERN5amrex8MultiFabERKS3_iiiRKNS2_9IntVectNDILi3EEESA_bRKNS2_11PeriodicityENS2_12FabArrayBase4CpOpE+0x274) [0xef7ccd65ef54]
+    ?? ??:0
+
+12: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN3PML8ExchangeERN5amrex8MultiFabES2_RKNS0_8GeometryEi+0x384) [0xef7ccd46bc54]
+    ?? ??:0
+
+13: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN3PML8ExchangeESt5arrayIPN5amrex8MultiFabELm3EES4_RKN7ablastr5utils5enums9PatchTypeEi+0x58) [0xef7ccd46c418]
+    ?? ??:0
+
+14: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN5WarpX13FillBoundaryEEiN7ablastr5utils5enums9PatchTypeEN5amrex9IntVectNDILi3EEESt8optionalIbE+0x338) [0xef7ccd285308]
+    ?? ??:0
+
+15: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN5WarpX13FillBoundaryEEiN5amrex9IntVectNDILi3EEESt8optionalIbE+0x44) [0xef7ccd285464]
+    ?? ??:0
+
+16: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN5WarpX13FillBoundaryEEN5amrex9IntVectNDILi3EEESt8optionalIbE+0x48) [0xef7ccd2854ec]
+    ?? ??:0
+
+17: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN5WarpX31ExplicitFillBoundaryEBUpdateAuxEv+0x54) [0xef7ccd17a7f4]
+    ?? ??:0
+
+18: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(_ZN5WarpX6EvolveEi+0xe34) [0xef7ccd17d914]
+    ?? ??:0
+
+19: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(+0x22422c) [0xef7ccd0e422c]
+    ?? ??:0
+
+20: /home/titanic/warpx/build/lib/site-packages/pywarpx/warpx_pybind_3d.cpython-312-aarch64-linux-gnu.so(+0x2010b8) [0xef7ccd0c10b8]
+    ?? ??:0
+
+21: python3() [0x50367c]
+    PyCMethod_New at ??:?
+
+22: python3(PyObject_Vectorcall+0x4c) [0x4c3a2c]
+    PyObject_Vectorcall at ??:?
+
+23: python3(_PyEval_EvalFrameDefault+0x8f4) [0x564f28]
+    _PyEval_EvalFrameDefault at ??:?
+
+24: python3(PyEval_EvalCode+0x130) [0x563224]
+    PyEval_EvalCode at ??:?
+
+25: python3() [0x59c144]
+    PyRun_StringFlags at ??:?
+
+26: python3() [0x680e34]
+    _PyRun_SimpleFileObject at ??:?
+
+27: python3(_PyRun_SimpleFileObject+0x194) [0x680a08]
+    _PyRun_SimpleFileObject at ??:?
+
+28: python3(_PyRun_AnyFileObject+0x54) [0x6807d4]
+    _PyRun_AnyFileObject at ??:?
+
+29: python3(Py_RunMain+0x2dc) [0x68b7dc]
+    Py_RunMain at ??:?
+
+30: python3(Py_BytesMain+0x28) [0x68b398]
+    Py_BytesMain at ??:?
+
+31: /lib/aarch64-linux-gnu/libc.so.6(+0x284c4) [0xef7d3e5a84c4]
+
+32: /lib/aarch64-linux-gnu/libc.so.6(__libc_start_main+0x98) [0xef7d3e5a8598]
+
+33: python3(_start+0x30) [0x5f6bb0]
+    _start at ??:?
+
+
+===== TinyProfilers ======
+REG::WarpX::Evolve()
+WarpX::Evolve()
+WarpX::Evolve::step
+PML::Exchange
+ablastr::utils::communication::ParallelCopy
+FabArray::ParallelCopy()
+FabArray::ParallelCopy_finish()
+

@@ -184,11 +184,20 @@ int mesh_mpi_recv_raw(int src, void *buf, size_t len,
 
             /* Check if this is a relay message */
             if ((rhdr->flags & MESH_MPI_FLAG_RELAY) && rhdr->final_dest != g_mpi.rank) {
-                /* Forward to next hop */
+                /* Forward to next hop — preserve original header (src_rank!) */
                 int fwd_dest = rhdr->final_dest;
-                mesh_mpi_send_raw(fwd_dest, rptr + sizeof(mesh_mpi_hdr_t),
-                                  rhdr->length, rhdr->tag, rhdr->comm_id,
-                                  rhdr->flags);
+                int next_hop = g_mpi.ring_route[fwd_dest];
+                if (next_hop >= 0 && g_mpi.peers[next_hop].direct) {
+                    mesh_mpi_peer_t *fwd_peer = &g_mpi.peers[next_hop];
+                    int slot = fwd_peer->send_head % 16;
+                    fwd_peer->send_head++;
+                    char *sbuf = fwd_peer->send_pool + slot * (4 * 1024 * 1024);
+                    size_t total = sizeof(mesh_mpi_hdr_t) + rhdr->length;
+                    /* Copy ENTIRE original message including header */
+                    memcpy(sbuf, rptr, total);
+                    mesh_rdma_post_send(fwd_peer->conn, sbuf, total,
+                                         fwd_peer->send_mr->mr->lkey, (uint64_t)slot);
+                }
 
                 /* Re-post receive */
                 mesh_rdma_post_recv(peer->conn,
@@ -244,6 +253,7 @@ int mesh_mpi_recv_raw(int src, void *buf, size_t len,
 
 int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
              int dest, int tag, MPI_Comm comm) {
+    fprintf(stderr, "[mpi] rank %d: Send to %d tag=%d count=%d\n", g_mpi.rank, dest, tag, count); fflush(stderr);
     if (dest == MPI_PROC_NULL) return MPI_SUCCESS;
     size_t len = count * (size_t)datatype;
     int rc = mesh_mpi_send_raw(dest, buf, len, tag, comm->id, MESH_MPI_FLAG_EAGER);
@@ -252,6 +262,7 @@ int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
 
 int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
              int source, int tag, MPI_Comm comm, MPI_Status *status) {
+    fprintf(stderr, "[mpi] rank %d: Recv from %d tag=%d count=%d\n", g_mpi.rank, source, tag, count); fflush(stderr);
     if (source == MPI_PROC_NULL) {
         if (status && status != MPI_STATUS_IGNORE) {
             status->MPI_SOURCE = MPI_PROC_NULL;
@@ -301,6 +312,7 @@ static int alloc_request(void) {
 
 int MPI_Isend(const void *buf, int count, MPI_Datatype datatype,
               int dest, int tag, MPI_Comm comm, MPI_Request *request) {
+    fprintf(stderr, "[mpi] rank %d: Isend to %d tag=%d count=%d\n", g_mpi.rank, dest, tag, count); fflush(stderr);
     if (dest == MPI_PROC_NULL) {
         *request = MPI_REQUEST_NULL;
         return MPI_SUCCESS;
@@ -325,6 +337,7 @@ int MPI_Isend(const void *buf, int count, MPI_Datatype datatype,
 
 int MPI_Irecv(void *buf, int count, MPI_Datatype datatype,
               int source, int tag, MPI_Comm comm, MPI_Request *request) {
+    fprintf(stderr, "[mpi] rank %d: Irecv from %d tag=%d count=%d\n", g_mpi.rank, source, tag, count); fflush(stderr);
     if (source == MPI_PROC_NULL) {
         *request = MPI_REQUEST_NULL;
         return MPI_SUCCESS;
@@ -395,11 +408,26 @@ int mesh_mpi_progress(void) {
         int rslot = (int)wc.wr_id;
         char *rptr = peer->recv_pool + rslot * (4 * 1024 * 1024);
         mesh_mpi_hdr_t *rhdr = (mesh_mpi_hdr_t *)rptr;
+        fprintf(stderr, "[progress] rank %d: CQ hit from peer %d opcode=%d "
+                "hdr: src=%d dst=%d tag=%d flags=0x%x len=%d\n",
+                g_mpi.rank, p, wc.opcode,
+                rhdr->src_rank, rhdr->final_dest, rhdr->tag,
+                rhdr->flags, rhdr->length); fflush(stderr);
 
-        /* Relay check */
+        /* Relay check — forward with original header preserved */
         if ((rhdr->flags & MESH_MPI_FLAG_RELAY) && rhdr->final_dest != g_mpi.rank) {
-            mesh_mpi_send_raw(rhdr->final_dest, rptr + sizeof(mesh_mpi_hdr_t),
-                              rhdr->length, rhdr->tag, rhdr->comm_id, rhdr->flags);
+            int fwd_dest = rhdr->final_dest;
+            int next_hop = g_mpi.ring_route[fwd_dest];
+            if (next_hop >= 0 && g_mpi.peers[next_hop].direct) {
+                mesh_mpi_peer_t *fwd_peer = &g_mpi.peers[next_hop];
+                int slot = fwd_peer->send_head % 16;
+                fwd_peer->send_head++;
+                char *sbuf = fwd_peer->send_pool + slot * (4 * 1024 * 1024);
+                size_t total = sizeof(mesh_mpi_hdr_t) + rhdr->length;
+                memcpy(sbuf, rptr, total);
+                mesh_rdma_post_send(fwd_peer->conn, sbuf, total,
+                                     fwd_peer->send_mr->mr->lkey, (uint64_t)slot);
+            }
             mesh_rdma_post_recv(peer->conn,
                                 peer->recv_pool + rslot * (4 * 1024 * 1024),
                                 (4 * 1024 * 1024),
@@ -476,6 +504,9 @@ int MPI_Wait(MPI_Request *request, MPI_Status *status) {
 
 int MPI_Waitall(int count, MPI_Request array_of_requests[],
                 MPI_Status array_of_statuses[]) {
+    fprintf(stderr, "[mpi] rank %d: Waitall count=%d\n", g_mpi.rank, count); fflush(stderr);
+    static int waitall_calls = 0;
+    waitall_calls++;
     for (int i = 0; i < count; i++) {
         MPI_Status *st = (array_of_statuses && array_of_statuses != MPI_STATUSES_IGNORE)
                          ? &array_of_statuses[i] : MPI_STATUS_IGNORE;
